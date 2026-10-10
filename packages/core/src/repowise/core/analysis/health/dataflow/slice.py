@@ -33,7 +33,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
+from ..complexity.ast_utils import member_object, self_member_name
 from ..complexity.nloc import _code_line_numbers
+from .dialects.base import SUPER, mentions_receiver
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
     from ..complexity.languages import LanguageNodeMap
     from .analyze import FunctionAnalysis
     from .defuse import FunctionDefUse
+    from .dialects.base import Receiver
 
 # Gates (precision-first; tuned to suppress trivial or unwieldy extractions).
 _MIN_STMTS = 2  # at least two statements
@@ -73,6 +76,16 @@ class Extraction:
     carries (the complexity the residual method sheds). ``needs_async`` is
     True when the span suspends (an ``await_kinds`` token outside any nested
     scope): the helper must be async and its call site awaited.
+
+    ``uses_receiver`` says whether the span names the instance its method
+    runs on (``self``, ``this``, ``super``, a Go receiver; lambdas in the
+    span count, they share it), and ``receiver_assigns`` which of its fields
+    the span assigns directly (``self.x = ...``, ``self.x[k] += ...``,
+    ``this.n++``, unpacking targets): not through an alias, a mutating call
+    (``self.items.append``) or ``del``. Both are None when the language cannot
+    tell (no receiver model, or a bare name that may be a field in Java /
+    C++), and ``receiver_assigns`` also when an assignment target rooted at
+    the receiver has a shape this does not read.
     """
 
     start_line: int
@@ -82,14 +95,54 @@ class Extraction:
     slice_nloc: int
     ccn_removed: int
     needs_async: bool = False
+    uses_receiver: bool | None = None
+    receiver_assigns: tuple[str, ...] | None = None
 
 
-def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[Extraction]:
+class _Scan(NamedTuple):
+    """The node kinds the per-statement walk counts, built once per function."""
+
+    decisions: frozenset[str]
+    jumps: frozenset[str]
+    scopes: frozenset[str]
+    exit_macros: tuple[frozenset[str], frozenset[str]]
+    awaits: tuple[frozenset[str], frozenset[str]]
+    lambdas: frozenset[str] = frozenset()
+    receiver: Receiver | None = None
+
+
+class _Metrics(NamedTuple):
+    """What :func:`_span_metrics` finds in a span or a whole function body."""
+
+    decisions: int
+    jump: bool
+    awaits: bool
+    receiver_use: bool = False
+    receiver_assigns: frozenset[str] = frozenset()
+
+
+class _Prefix(NamedTuple):
+    """Per-statement metrics of one block as prefix sums (``writes`` stays
+    per statement: only the spans that pass every gate union it)."""
+
+    decisions: list[int]
+    jumps: list[int]
+    awaits: list[int]
+    nested: list[int]
+    code: list[int]
+    receiver: list[int]
+    assigns: list[frozenset[str]]
+
+
+def find_extractions(
+    analysis: FunctionAnalysis, lmap: LanguageNodeMap, receiver: Receiver | None = None
+) -> list[Extraction]:
     """Return safe Extract Method candidates for *analysis*, best first.
 
     Best is most complexity removed, then largest span, then fewest parameters,
     then earliest -- a deterministic order. Empty when the function has no AST
-    node retained or no span clears the extractability gates.
+    node retained or no span clears the extractability gates. *receiver* is
+    the function's instance (``DefUseDialect.receiver``), None when unknown.
     """
     fn_node = analysis.fn_node
     if fn_node is None:
@@ -117,21 +170,9 @@ def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[
     hoisted = _hoisted_bindings(def_lines, use_lines)
     decl_lines = _declaration_lines(analysis.def_use)
     shared = _closure_state(analysis.def_use, def_lines, use_lines)
-    decision_kinds = (
-        lmap.branch_kinds
-        | lmap.loop_kinds
-        | lmap.case_kinds
-        | lmap.catch_kinds
-        | lmap.boolean_operator_kinds
-    )
-    jump_kinds = (
-        lmap.return_kinds
-        | lmap.raise_kinds
-        | lmap.break_kinds
-        | lmap.continue_kinds
-        | lmap.yield_kinds
-    )
-    scope_kinds = lmap.function_kinds | lmap.lambda_kinds
+    scan = _scan_for(lmap, receiver, fn_node)
+    scope_kinds = scan.scopes
+    free_writes = _free_write_lines(analysis.def_use) if receiver and receiver.implicit else []
     # Expression-oriented grammars (nonempty ``statement_wrapper_kinds``): a
     # block's last child that is not a statement is its tail expression -- the
     # block's implicit value. A span ending on one would silently drop that
@@ -151,31 +192,8 @@ def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[
         keeps_tail = tail_stmt_kinds is not None and _tail_is_block_value(
             stmts, tail_stmt_kinds, fn_node, lmap
         )
-        # One subtree walk per statement, then O(1) metrics per span via
-        # prefix sums. _span_metrics processes each span statement's subtree
-        # independently, so a span's decision count is the sum over its
-        # statements and its jump bit the OR — walking each statement once
-        # replaces the per-span re-walks that made this loop O(n^2 * subtree).
         if n >= _MIN_STMTS:
-            dec_prefix = [0]
-            jump_prefix = [0]
-            # Named-nested-function count rides the same prefix sums, for the
-            # same reason: the check is a subtree walk, and asking it per
-            # candidate span would put the O(n^2 * subtree) cost straight back.
-            nested_prefix = [0]
-            code_prefix = [0]
-            await_prefix = [0]
-            for st in stmts:
-                d, jmp, awaits = _span_metrics(
-                    [st], decision_kinds, jump_kinds, scope_kinds, _exit_macros(lmap), _awaits(lmap)
-                )
-                dec_prefix.append(dec_prefix[-1] + d)
-                jump_prefix.append(jump_prefix[-1] + (1 if jmp else 0))
-                await_prefix.append(await_prefix[-1] + (1 if awaits else 0))
-                nested_prefix.append(
-                    nested_prefix[-1] + (1 if _holds_a_named_nested_function([st], lmap) else 0)
-                )
-                code_prefix.append(code_prefix[-1] + _stmts_nloc([st], lines))
+            pre = _block_prefix(stmts, scan, lines, lmap)
         for i in range(n):
             for j in range(i, n):
                 evaluated += 1
@@ -189,11 +207,11 @@ def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[
                     continue
                 if keeps_tail and j == n - 1:
                     continue
-                decisions = dec_prefix[j + 1] - dec_prefix[i]
-                has_jump = jump_prefix[j + 1] > jump_prefix[i]
+                decisions = pre.decisions[j + 1] - pre.decisions[i]
+                has_jump = pre.jumps[j + 1] > pre.jumps[i]
                 if has_jump or decisions < _MIN_CCN_REMOVED:
                     continue
-                slice_nloc = code_prefix[j + 1] - code_prefix[i]
+                slice_nloc = pre.code[j + 1] - pre.code[i]
                 if not _MIN_SLICE_NLOC <= slice_nloc < max_slice_nloc:
                     continue
                 span = stmts[i : j + 1]
@@ -210,7 +228,7 @@ def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[
                     s, e, returns, decl_lines, def_lines, use_lines, declared_first
                 ):
                     continue
-                if nested_prefix[j + 1] > nested_prefix[i]:
+                if pre.nested[j + 1] > pre.nested[i]:
                     continue
                 if shared is not None and _closure_state_crosses(shared, span, s, e, block, lmap):
                     continue
@@ -218,6 +236,7 @@ def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[
                     span, loop, s, e, def_lines, use_lines, lmap
                 ):
                     continue
+                uses, assigns = _receiver_facts(receiver, pre, i, j, _count_in(free_writes, s, e))
                 out.append(
                     Extraction(
                         start_line=s,
@@ -226,10 +245,86 @@ def find_extractions(analysis: FunctionAnalysis, lmap: LanguageNodeMap) -> list[
                         returns=returns,
                         slice_nloc=slice_nloc,
                         ccn_removed=decisions,
-                        needs_async=await_prefix[j + 1] > await_prefix[i],
+                        needs_async=pre.awaits[j + 1] > pre.awaits[i],
+                        uses_receiver=uses,
+                        receiver_assigns=assigns,
                     )
                 )
     return _sorted(out)
+
+
+def _scan_for(lmap: LanguageNodeMap, receiver: Receiver | None, fn_node: Node) -> _Scan:
+    """The walk's kinds for *fn_node*. The receiver is looked for only when
+    its name (or ``super``) appears in the function's text at all: most
+    functions never mention it, and then no node needs the check."""
+    if receiver is not None and not (receiver.names and mentions_receiver(fn_node, receiver.names)):
+        receiver = None
+    return _Scan(
+        decisions=lmap.branch_kinds
+        | lmap.loop_kinds
+        | lmap.case_kinds
+        | lmap.catch_kinds
+        | lmap.boolean_operator_kinds,
+        jumps=lmap.return_kinds
+        | lmap.raise_kinds
+        | lmap.break_kinds
+        | lmap.continue_kinds
+        | lmap.yield_kinds,
+        scopes=lmap.function_kinds | lmap.lambda_kinds,
+        exit_macros=_exit_macros(lmap),
+        awaits=_awaits(lmap),
+        lambdas=lmap.lambda_kinds,
+        receiver=receiver,
+    )
+
+
+def _block_prefix(
+    stmts: list[Node], scan: _Scan, lines: list[str], lmap: LanguageNodeMap
+) -> _Prefix:
+    """One subtree walk per statement, so every span's metrics come from
+    prefix sums in O(1): a span's decision count is the sum over its
+    statements and its jump bit the OR, and re-walking per span made the
+    candidate loop O(n^2 * subtree). The named-nested-function check rides
+    the same sums for the same reason."""
+    pre = _Prefix([0], [0], [0], [0], [0], [0], [])
+    for st in stmts:
+        m = _span_metrics([st], scan)
+        pre.decisions.append(pre.decisions[-1] + m.decisions)
+        pre.jumps.append(pre.jumps[-1] + m.jump)
+        pre.awaits.append(pre.awaits[-1] + m.awaits)
+        pre.nested.append(pre.nested[-1] + _holds_a_named_nested_function([st], lmap))
+        pre.code.append(pre.code[-1] + _stmts_nloc([st], lines))
+        pre.receiver.append(pre.receiver[-1] + m.receiver_use)
+        pre.assigns.append(m.receiver_assigns)
+    return pre
+
+
+def _free_write_lines(def_use: FunctionDefUse) -> list[int]:
+    """Sorted lines writing a name the function neither declares nor takes
+    as a parameter: in Java or C++ that is a field (or a C++ global) written
+    without ``this``, so the span's receiver writes are not all known."""
+    params = {p.name for p in def_use.params}
+    declared = {d.var for d in def_use.definitions if d.declares or d.declared_at is not None}
+    return sorted(
+        d.line for d in def_use.definitions if d.var not in params and d.var not in declared
+    )
+
+
+def _receiver_facts(
+    receiver: Receiver | None, pre: _Prefix, i: int, j: int, free_writes: int
+) -> tuple[bool | None, tuple[str, ...] | None]:
+    """``uses_receiver`` / ``receiver_assigns`` for the span over statements
+    ``i..j`` (see :class:`Extraction`)."""
+    if receiver is None:
+        return None, None
+    if not receiver.names:
+        return False, ()
+    named = pre.receiver[j + 1] > pre.receiver[i]
+    found = frozenset().union(*pre.assigns[i : j + 1])
+    fields = None if _UNREAD_TARGET in found else tuple(sorted(found))
+    if receiver.implicit:
+        return (True if named else None), (None if free_writes else fields)
+    return named, fields
 
 
 def _tail_is_block_value(
@@ -1005,34 +1100,139 @@ def _is_jump(
     return name is not None and bool(name.text) and name.text.decode("utf-8", "replace") in names
 
 
-def _span_metrics(
-    span: list[Node],
-    decision_kinds: frozenset[str],
-    jump_kinds: frozenset[str],
-    scope_kinds: frozenset[str],
-    exit_macros: tuple[frozenset[str], frozenset[str]],
-    awaits: tuple[frozenset[str], frozenset[str]],
-) -> tuple[int, bool, bool]:
-    """Decision-point count, jump presence and await presence within *span*
-    (nested scopes are not descended into). A macro named in *exit_macros*
-    counts as a jump; an await under one of *awaits*' scope kinds (``async``
-    blocks) does not suspend the function, so it does not count."""
-    await_kinds, await_scope_kinds = awaits
+def _span_metrics(span: list[Node], scan: _Scan) -> _Metrics:
+    """Decision points, jump and await presence, and receiver references
+    within *span*: a candidate span's statements, or a function body's for
+    facts about the whole function. Nested scopes are not descended into,
+    except a lambda for the receiver alone, since it shares the instance. A
+    macro named in ``scan.exit_macros`` counts as a jump; an await under one
+    of the await scope kinds (``async`` blocks) does not suspend the
+    function."""
+    await_kinds, await_scope_kinds = scan.awaits
+    receiver = scan.receiver
     decisions = 0
-    has_jump = False
-    has_await = False
+    has_jump = has_await = uses = False
+    assigns: set[str] = set()
     for root in span:
-        stack: list[tuple[Node, bool]] = [(root, True)]
+        # (node, whether its awaits count, inside a lambda: receiver only)
+        stack: list[tuple[Node, bool, bool]] = [(root, True, False)]
         while stack:
-            node, counts_await = stack.pop()
-            t = node.type
-            has_jump = has_jump or _is_jump(node, jump_kinds, exit_macros)
-            has_await = has_await or (counts_await and t in await_kinds)
-            if t in decision_kinds:
-                decisions += 1
-            counts_await = counts_await and t not in await_scope_kinds
-            for child in node.children:
-                if child.type in scope_kinds:
-                    continue
-                stack.append((child, counts_await))
-    return decisions, has_jump, has_await
+            node, counts_await, nested = stack.pop()
+            if receiver is not None:
+                uses = _receiver_ref(node, receiver, assigns) or uses
+            if not nested:
+                t = node.type
+                has_jump = has_jump or _is_jump(node, scan.jumps, scan.exit_macros)
+                has_await = has_await or (counts_await and t in await_kinds)
+                decisions += t in scan.decisions
+                counts_await = counts_await and t not in await_scope_kinds
+            _push_children(node, stack, counts_await, nested, scan)
+    return _Metrics(decisions, has_jump, has_await, uses, frozenset(assigns))
+
+
+def _push_children(
+    node: Node,
+    stack: list[tuple[Node, bool, bool]],
+    counts_await: bool,
+    nested: bool,
+    scan: _Scan,
+) -> None:
+    """Queue *node*'s children: nested scopes are skipped, except a lambda
+    when the receiver is looked for (it shares the instance)."""
+    for child in node.children:
+        if child.type not in scan.scopes:
+            stack.append((child, counts_await, nested))
+        elif scan.receiver is not None and child.type in scan.lambdas:
+            stack.append((child, False, True))
+
+
+# Index access on a receiver field (``self.cache[k] = v``) assigns into it.
+_INDEX_KINDS = frozenset({"subscript", "subscript_expression", "index_expression", "array_access"})
+# Unpacking targets whose named children are targets themselves
+# (``a, self.b = ...``, ``[this.x, y] = ...``).
+_UNPACK_KINDS = frozenset(
+    {
+        "pattern_list",
+        "tuple_pattern",
+        "list_pattern",
+        "expression_list",
+        "tuple",
+        "list",
+        "array_pattern",
+        "object_pattern",
+        "parenthesized_expression",
+        "list_splat_pattern",
+        "rest_pattern",
+    }
+)
+# Marks a target rooted at the receiver whose shape is not read, so the
+# span's assigned fields are unknown.
+_UNREAD_TARGET = ""
+
+
+def _receiver_ref(node: Node, receiver: Receiver, assigns: set[str]) -> bool:
+    """True when *node* names the receiver; an assignment to one of its
+    fields adds the field's name to *assigns* (the receiver leaf under it is
+    visited next)."""
+    if node.type in receiver.write_kinds:
+        target = (
+            node.child_by_field_name("left")
+            or node.child_by_field_name("argument")
+            or (node.named_children[0] if node.named_children else None)
+        )
+        if target is not None:
+            _collect_assigned(target, receiver, assigns)
+        return False
+    return _is_receiver(node, receiver)
+
+
+def _collect_assigned(target: Node, receiver: Receiver, assigns: set[str]) -> None:
+    """The receiver fields one assignment target writes, unpacking included;
+    a target of another shape that mentions the receiver makes them unknown."""
+    if target.type in _UNPACK_KINDS:
+        for each in target.named_children:
+            _collect_assigned(each, receiver, assigns)
+        return
+    if target.type in ("assignment_pattern", "object_assignment_pattern"):  # ``[this.a = 1]``
+        left = target.child_by_field_name("left")
+        if left is not None:
+            _collect_assigned(left, receiver, assigns)
+        return
+    if target.type == "pair_pattern":  # ``{key: this.a}``
+        value = target.child_by_field_name("value")
+        if value is not None:
+            _collect_assigned(value, receiver, assigns)
+        return
+    field = _receiver_field(target, receiver)
+    if field:
+        assigns.add(field)
+    elif target.type not in receiver.access_kinds | _INDEX_KINDS and mentions_receiver(
+        target, receiver.names
+    ):
+        assigns.add(_UNREAD_TARGET)
+
+
+def _is_receiver(node: Node, receiver: Receiver) -> bool:
+    """A leaf naming the receiver: a ``this`` / ``self`` / ``super`` token,
+    or an identifier spelling a named receiver (Python ``self``, Go ``s``)
+    or ``super`` (Python's no-argument ``super()``)."""
+    if node.children or not node.text:
+        return False
+    if node.type in receiver.names or node.type == SUPER:
+        return True
+    if node.type != "identifier":
+        return False
+    text = node.text.decode("utf-8", "replace")
+    return text in receiver.names or text == SUPER
+
+
+def _receiver_field(target: Node, receiver: Receiver) -> str | None:
+    """``x`` for an assignment target ``self.x``, ``self.x.y`` or ``self.x[k]``."""
+    cur: Node | None = target
+    while cur is not None and (cur.type in receiver.access_kinds or cur.type in _INDEX_KINDS):
+        if cur.type in receiver.access_kinds:
+            field = self_member_name(cur, receiver.names)
+            if field is not None:
+                return field
+        cur = member_object(cur)
+    return None

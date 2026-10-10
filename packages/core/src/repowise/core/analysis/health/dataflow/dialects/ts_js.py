@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import BaseDefUseDialect, Occurrence, StatementDefUse
+from .base import BaseDefUseDialect, Occurrence, Receiver, StatementDefUse
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -57,11 +57,17 @@ _SCOPE_BOUNDARIES = frozenset(
         "method_definition",
     }
 )
+_THIS = frozenset({"this"})
+
+
+def _is_static(method: Node) -> bool:
+    return any(c.type == "static" for c in method.children)
 
 
 class TsJsDefUseDialect(BaseDefUseDialect):
     language = "typescript"
     member_access_kinds = frozenset({"member_expression"})
+    receiver_write_kinds = _ASSIGN_KINDS | _AUG_KINDS | _UPDATE_KINDS
     keyword_kinds = frozenset()  # object-property keys are not variable reads.
     # ``shorthand_property_identifier`` is an object-literal read (``{ days }``
     # reads the local ``days``). Its ``_pattern`` twin is the destructuring
@@ -105,6 +111,23 @@ class TsJsDefUseDialect(BaseDefUseDialect):
                 pattern = child if child.type in self.identifier_kinds else None
             self._targets(pattern, out, sink)
         return tuple(out)
+
+    def _own_receiver(self, fn_node: Node, lmap: LanguageNodeMap) -> Receiver | None:
+        """``this``, bound when it is a class instance: a class method, or an
+        arrow function (which takes ``this`` from where it is written) inside
+        one or in a class field. An object-literal method or a plain function
+        gets ``this`` from its caller, so a helper method cannot share it. In
+        a ``static`` method ``this`` is the class, not an instance: judged
+        unbound too, the conservative call."""
+        node = fn_node
+        while node is not None and node.type not in lmap.class_kinds:
+            if node.type in _SCOPE_BOUNDARIES and node.type != "arrow_function":
+                parent = node.parent
+                in_class = node.type == "method_definition" and parent is not None
+                bound = in_class and parent.type == "class_body" and not _is_static(node)
+                return self._receiver(_THIS, bound=bound)
+            node = node.parent
+        return self._receiver(_THIS, bound=node is not None)
 
     # -- head (loop clause / if condition) ------------------------------------
 

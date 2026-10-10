@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import BaseDefUseDialect, Occurrence, StatementDefUse
+from .base import NO_RECEIVER, BaseDefUseDialect, Occurrence, Receiver, StatementDefUse
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -70,9 +70,19 @@ _SCOPE_BOUNDARIES = frozenset({"lambda_expression"})
 _CALLEE_NAME_KINDS = frozenset({"identifier", "qualified_identifier", "template_function"})
 
 
+def _declarator_name(fn_node: Node) -> Node | None:
+    """The innermost node of a definition's ``declarator`` chain (its name),
+    None for a lambda, which has no declarator."""
+    name = fn_node.child_by_field_name("declarator")
+    while name is not None and name.child_by_field_name("declarator") is not None:
+        name = name.child_by_field_name("declarator")
+    return name
+
+
 class CppDefUseDialect(BaseDefUseDialect):
     language = "cpp"
     member_access_kinds = frozenset({_FIELD_EXPRESSION})
+    receiver_write_kinds = _ASSIGN_KINDS | _UPDATE_KINDS
     keyword_kinds = frozenset()  # C++ has no keyword arguments.
 
     def _is_scope_boundary(self, node: Node) -> bool:
@@ -119,6 +129,27 @@ class CppDefUseDialect(BaseDefUseDialect):
             if name_node is not None:
                 out.append(self._occ(name_node))
         return tuple(out)
+
+    def _own_receiver(self, fn_node: Node, lmap: LanguageNodeMap) -> Receiver | None:
+        """``this`` for a member function defined in its class (a bare name
+        can also be a field); none for a ``static`` one or a free function.
+        Unknown for an out-of-class ``A::f`` definition (whether it is static
+        is declared in the class, which this file may not hold) and for a
+        lambda, which captures ``this`` or not in a list this does not read."""
+        name = _declarator_name(fn_node)
+        if name is None:
+            return None
+        if any(
+            c.type == "storage_class_specifier" and c.text == b"static"
+            for c in fn_node.named_children
+        ):
+            return NO_RECEIVER
+        parent = fn_node.parent
+        if parent is not None and parent.type == "template_declaration":
+            parent = parent.parent
+        if parent is not None and parent.type == "field_declaration_list":
+            return self._receiver(lmap.self_identifiers, implicit=True)
+        return None if name.type == "qualified_identifier" else NO_RECEIVER
 
     def _parameter_list(self, fn_node: Node) -> Node | None:
         node: Node | None = fn_node
