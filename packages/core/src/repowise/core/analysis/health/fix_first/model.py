@@ -10,12 +10,14 @@ import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, get_args
 
+from repowise.core.analysis.health.queue.eligibility import SCOPE_EXCLUSIONS
+from repowise.core.analysis.health.queue.order import DUE_TIERS, Tier
 from repowise.core.analysis.next_call import ActionCommand
 
 #: Bumped when ranking, eligibility or the item shape changes meaning.
 FIX_FIRST_MODEL_VERSION = 1
 
-FixTier = Literal["now", "next", "later"]
+FixTier = Tier
 FIX_TIERS: tuple[str, ...] = get_args(FixTier)
 
 FixKind = Literal["refactor", "perf_fix", "finding"]
@@ -36,10 +38,11 @@ FIX_LEVELS: tuple[str, ...] = get_args(FixLevel)
 FixFactBasis = Literal["measured", "inferred", "unknown"]
 FIX_FACT_BASES: tuple[str, ...] = get_args(FixFactBasis)
 
-# ``unknown``, ``gated_off``, ``expected`` and ``no_strategy`` are the
-# performance default queue's own reasons (``opportunity_rank.DEFAULT_QUEUE_EXCLUSIONS``);
-# ``gated_off`` also keeps out any other unit in a function a constant-false
-# flag switches off. ``unreachable``: an open dead-code finding covers the target.
+# The reasons Fix first's ladders produce, from the one vocabulary in
+# ``queue.eligibility.Reason``. ``unknown``, ``gated_off``, ``cold_path``,
+# ``expected`` and ``no_strategy`` come from the performance ladder; ``gated_off``
+# also keeps out any other unit in a function a constant-false flag switches
+# off. ``unreachable``: an open dead-code finding covers the target.
 FixExclusion = Literal[
     "test",
     "tooling",
@@ -60,22 +63,12 @@ FixExclusion = Literal[
     "small_function",
     "no_concrete_step",
     "low_value_kind",
+    "kind_unaudited",
 ]
 FIX_EXCLUSIONS: tuple[str, ...] = get_args(FixExclusion)
 
-#: Exclusions that say where the code lives, not whether the work is worth
-#: doing: a unit excluded for one of these was never in scope.
-SCOPE_EXCLUSIONS = frozenset({"test", "tooling", "generated", "vendored", "docs_example"})
-
-#: Tiers a unit is due in: worth scheduling now, not just worth listing.
-DUE_TIERS = frozenset({"now", "next"})
-
 FixScope = Literal["production", "all"]
 FIX_SCOPES: tuple[str, ...] = get_args(FixScope)
-
-TIER_RANK = {t: i for i, t in enumerate(FIX_TIERS)}
-LEVEL_RANK = {"high": 2, "medium": 1, "low": 0}
-EFFORT_RANK = {e: i for i, e in enumerate(FIX_EFFORTS)}
 
 _ID_PREFIX = "fix1_"
 
@@ -285,8 +278,6 @@ class FixFirstQueue:
 
 
 __all__ = [
-    "DUE_TIERS",
-    "EFFORT_RANK",
     "FIX_EFFORTS",
     "FIX_EXCLUSIONS",
     "FIX_FACT_BASES",
@@ -297,9 +288,6 @@ __all__ = [
     "FIX_LEVELS",
     "FIX_SCOPES",
     "FIX_TIERS",
-    "LEVEL_RANK",
-    "SCOPE_EXCLUSIONS",
-    "TIER_RANK",
     "FixAction",
     "FixConfidence",
     "FixContext",
