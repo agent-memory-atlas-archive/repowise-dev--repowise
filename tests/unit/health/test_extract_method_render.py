@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from repowise.core.analysis.health.complexity.languages import get_language_map
 from repowise.core.analysis.health.dataflow import (
     Extraction,
     analyze_file,
@@ -398,3 +399,65 @@ def test_read_after_names_the_inputs_the_host_still_uses():
     (fn,) = _functions("python", "py", src)
     span = Extraction(4, 5, ("cfg", "rows", "total"), ("total",), slice_nloc=2, ccn_removed=1)
     assert em._read_after(fn, span) == {"cfg", "total"}
+
+
+def test_a_rust_let_in_the_span_declares_the_output_it_shadows():
+    # ``x`` is written before the span, so only the in-span ``let`` tells the
+    # call to declare it (``let x = ...``) rather than assign the old one.
+    src = """
+    fn f(rows: Vec<i32>) -> i32 {
+        let x = 0;
+        println!("{}", x);
+        let x = rows.len() as i32;
+        x
+    }
+    """
+    (fn,) = _functions("rust", "rs", src)
+    lets = [d for d in fn.def_use.definitions if d.var == "x"]
+    assert lets and all(d.declares and d.declared_at is not None for d in lets)
+    span = Extraction(5, 5, ("rows",), ("x",), slice_nloc=1, ccn_removed=1)
+    assert em._out_binding(fn, span, get_language_map("rust")) == (True, True, False)
+
+
+_NESTED_SHADOW = {
+    "rust": (
+        "rs",
+        """
+        fn f(a: i32, c: bool) -> i32 {
+            let mut x = a;
+            println!("{}", x);
+            if c {
+                let x = 2;
+                println!("{}", x);
+            }
+            x = a + 1;
+            x
+        }
+        """,
+    ),
+    "typescript": (
+        "ts",
+        """
+        function f(a: number, c: boolean): number {
+            let x = a;
+            console.log(x);
+            if (c) {
+                let x = 2;
+                console.log(x);
+            }
+            x = a + 1;
+            return x;
+        }
+        """,
+    ),
+}
+
+
+@pytest.mark.parametrize("language", sorted(_NESTED_SHADOW))
+def test_a_declaration_nested_in_the_span_does_not_declare_the_output(language: str):
+    # The inner ``x`` binds only in its block; the span's top-level write
+    # assigns the outer ``x``, so the call assigns rather than declares.
+    ext, src = _NESTED_SHADOW[language]
+    (fn,) = _functions(language, ext, src)
+    span = Extraction(5, 9, ("a", "c"), ("x",), slice_nloc=5, ccn_removed=1)
+    assert em._out_binding(fn, span, get_language_map(language)) == (False, True, False)
