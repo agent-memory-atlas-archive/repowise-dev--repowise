@@ -270,6 +270,9 @@ a per-test coverage map (`repowise coverage add`) makes it more precise.
 - Without a range, in CI it reads the pull request's change; locally, the staged changes.
 - `tests.full_run_on` (gitignore patterns) adds run-everything paths, and a path it matches is never scoped; `tests.always_run` is appended to every selection as written, for the runner whose language each entry is in.
 - With `--runner pytest`, `go` or `jest`, the arguments hold only that runner's tests, `tests.always_run` included. A repository with tests in several languages needs one job per runner: the tests a job leaves out are counted on stderr, and listed per runner under `left_out` with `--format json`. `--runner files` gets every test.
+- Selected tests come likeliest to fail first ([run order](../reference/CLI_REFERENCE.md#repowise-impacted-tests-revspec)).
+  `--prioritize` prints the whole suite with the selection first, so a job can run the
+  head with `-x` and the rest after; it skips nothing.
 - `--explain <test>` says why one test file was or was not selected: the first changed file that reached it, the evidence (coverage, call graph, import graph) and the import route from the test to that file when there is one, or the rule that runs it. With `--format json` the same answer is added as `explain`, and `selected.why` holds it for every selected test.
 - Ceiling: on the JVM and .NET, a same-package test linked only by an unresolved call is missed. So is a test that reaches the change through a plugin or registry loaded by a string name, a tree walk or child process done inside a shared helper it calls, or one in another language: list such tests in `tests.always_run`, and run the full suite on the default branch.
 

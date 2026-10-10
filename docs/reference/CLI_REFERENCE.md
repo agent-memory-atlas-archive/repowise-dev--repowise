@@ -1069,7 +1069,8 @@ line up.
 | `--staged` | Diff the staged changes (`git diff --cached`); the default with no range outside CI (in CI: the pull request's change) |
 | `--format` | `table` (default), `json` (full report plus the selection), `list` (test ids one per line), or `args` (one line of runner arguments, or `:all`; reasons on stderr) |
 | `--runner` | For `--format args`: `auto` (default; `files` when mixed), `pytest` (node ids or files), `go` (package dirs), `jest` (files; pass with `--runTestsByPath`), `files` |
-| `--explain` | A test file or node id: say why it was or was not selected (the changed file, the evidence and the import route, or the rule that runs it). Added to `--format json` as `explain` |
+| `--explain` | A test file or node id: say why it was or was not selected (the changed file, the evidence and the import route, or the rule that runs it) and its place in the run order. Added to `--format json` as `explain` |
+| `--prioritize` | With `--format args`, `list` or `json`: the whole suite, the selected tests first in run order, then every other test. Skips nothing; a full run is ordered too |
 
 ```bash
 repowise impacted-tests                        # staged changes
@@ -1079,6 +1080,7 @@ repowise impacted-tests abc123                 # a single commit
 repowise impacted-tests main..HEAD --format list | xargs pytest
 repowise impacted-tests main...HEAD --format args --runner pytest
 repowise impacted-tests main...HEAD --explain tests/unit/test_api.py
+repowise impacted-tests main...HEAD --format args --prioritize
 ```
 
 `--format args` exits `0` whether it selects a subset or everything, and `2`
@@ -1090,6 +1092,17 @@ per-file `selected.basis`: `full-run`, `no-tests-needed`, `test-tree`,
 or `none` (no index), and a per-test `selected.why`: the first changed file and
 evidence that selected it, or why it runs with every subset. When it runs everything:
 [CI](../start/CI.md#selecting-the-tests-a-change-needs).
+
+**Run order.** `--format args` and `json` list the selected tests likeliest to fail
+first (`--format list` without `--prioritize` keeps the report's order). Tiers, in
+order: a test the change edits; one the per-test map runs on a changed line, then on
+a changed file; one whose calls, fixtures or direct import reach the change; one
+reaching it through other files; tests that run with every subset. Within a tier:
+a failure in the last local pytest run (`.pytest_cache`, ids relative to the
+repository root), fewer graph hops (when measured), more changes shared with the
+changed files, more changed files reached, then path. `--format json` lists each test under
+`order` with its `tier`, `hops`, `co_change` and `failed_last_run`. With
+`--prioritize`, a file selected only by some node ids runs whole at its place.
 
 ---
 
