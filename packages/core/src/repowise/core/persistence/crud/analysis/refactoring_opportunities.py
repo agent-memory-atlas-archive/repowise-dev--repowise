@@ -263,7 +263,7 @@ def _summary_payload(
 
 
 async def _rank_live_plans(session: AsyncSession, repository_id: str) -> list[Any]:
-    """Rank and validate every live plan the lists can show, and store it.
+    """Rank, validate and annotate every live plan the lists can show, and store it.
 
     Performance plans are not composed here, but they share the plan lists, so
     their positions come from the same pass. Plans the finding registry
@@ -271,6 +271,9 @@ async def _rank_live_plans(session: AsyncSession, repository_id: str) -> list[An
     is batch-sensitive, so ranking them alongside would change the tests the
     shown plans list.
     """
+    import dataclasses
+
+    from ....analysis.health.refactoring.annotations import annotate, load_annotation_facts
     from ....analysis.health.refactoring.recommendations import hydrate_recommendations
     from .refactoring import shown_plan_predicate, store_plan_ranks
 
@@ -284,6 +287,13 @@ async def _rank_live_plans(session: AsyncSession, repository_id: str) -> list[An
         )
     ).scalars()
     ranked = await hydrate_recommendations(session, repository_id, list(rows), step_verify=True)
+    facts = await load_annotation_facts(
+        session, repository_id, [item.suggestion for item in ranked]
+    )
+    ranked = [
+        dataclasses.replace(item, annotations=annotate(item.suggestion, facts))
+        for item in ranked
+    ]
     await store_plan_ranks(session, repository_id, ranked)
     return ranked
 
@@ -348,18 +358,29 @@ async def finalize_refactoring_opportunities(
         .all()
     )
 
+    # Rank and validation are resolved once, here, for every live plan. They
+    # used to be rebuilt on every request for every open plan, which is the
+    # single largest cost the serving path used to carry.
+    ranked = await _rank_live_plans(session, repository_id)
+    # Every ranked non-performance plan is a live plan, so the lookup is total;
+    # a miss raises rather than leaving a governed step mechanical.
+    public_of = {row.id: row.public_id for row in live_plans}
+    governed = {
+        public_of[item.id]
+        for item in ranked
+        if item.suggestion.refactoring_type != _PERF_TYPE
+        and item.annotations is not None
+        and item.annotations.governed_by
+    }
+
     # Findings let each step name the diagnosis its own target answers, so an
     # agent round-trips from a step to it in one call.
     opportunities = compose_opportunities(
         live_plans,
         primary_biomarker_by_file=primary_biomarker_by_file(findings),
         findings=findings,
+        governed=governed,
     )
-
-    # Rank and validation are resolved once, here, for every live plan. They
-    # used to be rebuilt on every request for every open plan, which is the
-    # single largest cost the serving path used to carry.
-    ranked = await _rank_live_plans(session, repository_id)
     step_plan_ids = {step.plan_id for item in opportunities for step in item.steps}
     step_rows = [row for row in live_plans if row.public_id in step_plan_ids]
     validations: dict[str, dict[str, Any]] = {}

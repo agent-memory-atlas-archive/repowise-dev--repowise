@@ -93,6 +93,21 @@ class RefactoringPlanResponse(BaseModel):
     validation: dict[str, Any] = Field(default_factory=dict)
 
 
+class PlanRiskResponse(BaseModel):
+    kind: str
+    text: str
+    ref: str | None = None
+
+
+class RefactoringPlanDetailResponse(RefactoringPlanResponse):
+    """One plan read alone: what other layers say about its target. Lists stay
+    on :class:`RefactoringPlanResponse` and never carry these; both are absent
+    on a plan that was never checked."""
+
+    governed_by: list[str] | None = None
+    risks: list[PlanRiskResponse] | None = None
+
+
 class RefactoringTypeCount(BaseModel):
     type: str
     count: int
@@ -491,18 +506,23 @@ async def update_refactoring_settings(
     return _read_refactoring_settings(config, repo_id, repo_path)
 
 
-@router.get("/{repo_id}/refactoring/{suggestion_id}", response_model=RefactoringPlanResponse)
+@router.get(
+    "/{repo_id}/refactoring/{suggestion_id}",
+    response_model=RefactoringPlanDetailResponse,
+    # Unset annotations stay absent: "never checked" is not "none found".
+    response_model_exclude_unset=True,
+)
 async def get_refactoring_plan(
     repo_id: str,
     suggestion_id: str,
     session: AsyncSession = Depends(get_db_session),
-) -> RefactoringPlanResponse:
+) -> RefactoringPlanDetailResponse:
     """One plan + its blast radius detail (deep-link / drill-down target)."""
     row = await crud.get_refactoring_suggestion(session, repo_id, suggestion_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"refactoring plan not found: {suggestion_id}")
     recommendation = await _service(session, repo_id).plan_recommendation(row)
-    return _to_response(recommendation.detail_dict())
+    return RefactoringPlanDetailResponse(**recommendation.detail_dict())
 
 
 class RefactoringStatusUpdate(BaseModel):
