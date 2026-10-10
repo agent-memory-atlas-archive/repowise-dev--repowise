@@ -19,6 +19,8 @@
     "switched": "语言已切换为{language}"
   },
   "shell": {
+    "switchToDarkTheme": "切换到深色主题",
+    "switchToLightTheme": "切换到浅色主题",
     "skipToContent": "跳到主内容",
     "expandSidebar": "展开侧边栏",
     "collapseSidebar": "收起侧边栏",
@@ -153,6 +155,11 @@
     "settingsErrorFallback": "无法加载设置，后端可能不可用。",
     "notFoundTitle": "页面不存在",
     "notFoundBody": "你请求的页面不存在，可能已被移动，或从未存在。",
+    "notFoundLinks": "试试这些入口",
+    "notFoundSearchHint": "或按 <kbd>Ctrl K</kbd>（Mac 上为 <kbd>⌘ K</kbd>）进行搜索。",
+    "repoOverview": "仓库概览",
+    "repoCodeHealth": "代码健康",
+    "repoDocs": "文档",
     "backToDashboard": "返回仪表盘",
     "errorTitle": "出错了",
     "errorFallback": "发生了意外错误，请重试。",
