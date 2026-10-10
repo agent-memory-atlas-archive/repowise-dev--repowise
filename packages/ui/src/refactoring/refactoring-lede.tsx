@@ -25,6 +25,8 @@ export type RefactoringFacets = RefactoringOpportunityPage["facets"];
 export interface RefactoringLedeProps {
   /** The repository rollup. Absent or unavailable and the lede does not render. */
   summary?: RefactoringOpportunityRollup | null | undefined;
+  /** Files indexed, for the all-clear line. */
+  indexedFileCount?: number | undefined;
   /** The page's facet counts. Absent and the chips do not render. */
   facets?: RefactoringFacets | null | undefined;
   /** Whether the list is narrowed to small effort, which the Quick wins chip toggles. */
@@ -47,6 +49,7 @@ function plural(n: number, one: string, many: string): string {
 
 export function RefactoringLede({
   summary,
+  indexedFileCount,
   facets,
   quickWinsActive = false,
   onToggleQuickWins,
@@ -58,6 +61,26 @@ export function RefactoringLede({
 
   const total = summary.opportunities_total;
   const files = summary.files_total;
+  if (total === 0) {
+    return (
+      <PageLede
+        label="Open opportunities"
+        value="0"
+        unit={
+          indexedFileCount ? `across ${formatNumber(indexedFileCount)} indexed files` : undefined
+        }
+        layout="beside"
+        action={action}
+      >
+        <p>
+          <span className="font-medium text-[var(--color-text-primary)]">
+            Nothing is worth splitting, cutting or extracting right now.
+          </span>{" "}
+          New opportunities appear here as files grow or cycles form.
+        </p>
+      </PageLede>
+    );
+  }
   const steps = summary.steps_total;
   const mechanical = summary.mechanical_steps_total;
   const judgment = summary.judgment_steps_total;
