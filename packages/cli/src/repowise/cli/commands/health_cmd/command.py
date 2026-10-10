@@ -42,6 +42,7 @@ from .codegen import _generate_refactoring_code
 from .persist import (
     _load_fix_first,
     _load_persisted_coverage_map,
+    _load_queue_counts,
     _load_recommendations,
     _load_stored_report,
     _persist_health,
@@ -337,6 +338,9 @@ def health_command(
                     "kpis": report.kpis,
                     "scope": parse_scope(scope),
                     "counts": parse_counts(counts),
+                    # Findings, causes, plans and Fix first items, as every
+                    # surface counts them; ``shown`` is 0, nothing is listed.
+                    "queue_counts": _load_queue_counts(repo_path),
                     "metrics": [
                         {
                             "file_path": m.file_path,

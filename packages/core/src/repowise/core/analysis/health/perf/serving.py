@@ -122,6 +122,8 @@ FILTERS: tuple[FilterRule, ...] = (
     FilterRule("proofs", "cost_proof", "in", "set"),
     FilterRule("roles", "execution_role", "in", "set"),
     FilterRule("file_paths", "file_path", "in", "set"),
+    # The default queue is the stored judgement (``queue.counts.perf_judgement``).
+    FilterRule("queue_eligible", "queue_eligible", "is", "set"),
 )
 
 #: Facet name, the field it counts, and the filter parameter it is
@@ -232,17 +234,54 @@ class PerformanceQuery:
         return alias if alias is not None else frozenset({self.context})
 
     @property
-    def actionabilities(self) -> frozenset[str]:
-        """The set the queue is filtered to: one explicit state, or the default queue states (plan_ready, advisory)."""
+    def default_queue(self) -> bool:
+        """Whether the caller named no context, state, proof or role: the
+        default queue, read from each cause's stored judgement."""
+        return (
+            self.context == DEFAULT_CONTEXT
+            and self.actionability is None
+            and self.proof is None
+            and self.role is None
+        )
+
+    @property
+    def queue_eligible(self) -> bool | None:
+        return True if self.default_queue else None
+
+    def store_filters(self, *, judged: bool = True) -> dict[str, Any]:
+        """The store's filter arguments. On a store whose causes are not all
+        judged (``judged=False``), the default queue reads its rule live:
+        the default states and proof instead of the stored verdict."""
+        live = self.default_queue and not judged
+        return {
+            "contexts": self.contexts,
+            "boundary": self.boundary,
+            "confidence": self.confidence,
+            "actionabilities": DEFAULT_ACTIONABILITIES if live else self.actionabilities,
+            "proofs": DEFAULT_QUEUE_PROOFS if live else self.proofs,
+            "roles": QUEUE_ROLES if live else self.roles,
+            "queue_eligible": None if live else self.queue_eligible,
+            "file_paths": self.file_paths,
+        }
+
+    @property
+    def actionabilities(self) -> frozenset[str] | None:
+        """One explicit state; else, under another context, the default
+        queue states (plan_ready, advisory). ``None`` for the default queue."""
+        if self.default_queue:
+            return None
         if self.actionability is None:
             return DEFAULT_ACTIONABILITIES
         return frozenset({self.actionability})
 
     @property
-    def proofs(self) -> frozenset[str]:
-        """``unproven`` when asked for; else the measured causes, so every
-        surface lists what the default queue counts. The ``proof`` facet says
-        how many unproven ones sit one filter away."""
+    def proofs(self) -> frozenset[str] | None:
+        """``unproven`` when asked for; else, under another context or state,
+        the measured causes, so every surface lists what the default queue
+        counts. ``None`` for the default queue. The ``proof`` facet says how
+        many unproven ones sit one filter away."""
+        if self.default_queue:
+            return None
         if self.proof is None:
             return DEFAULT_QUEUE_PROOFS
         return frozenset({self.proof})
@@ -251,7 +290,10 @@ class PerformanceQuery:
     def roles(self) -> frozenset[str] | None:
         """One role when asked for, every role under ``all``; else the roles
         the default queue holds, so startup, CLI, tooling and test loops sit
-        one filter away and the ``role`` facet counts them."""
+        one filter away and the ``role`` facet counts them. ``None`` for the
+        default queue, whose stored verdict already holds the role rule."""
+        if self.default_queue:
+            return None
         if self.role is None:
             return QUEUE_ROLES
         return None if self.role == "all" else frozenset({self.role})
