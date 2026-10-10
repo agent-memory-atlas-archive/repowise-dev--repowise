@@ -64,6 +64,16 @@ Plan shape (open dict, no migration):
   ``needs_async`` stays for stored rows and their readers. ``plan.receiver_hazard`` is set only when the
   receiver cannot be shared as it is (``_receiver_hazard``), which makes the
   step a judgment call.
+- ``new_symbol`` also carries ``params`` (``[{"name", "type", "mode": "in" |
+  "inout"}]``, the receiver left out of a method's) and ``returns``
+  (``[{"name", "type"}]``), each type read off the name's declaration (None
+  without one), and ``signature_text``, the helper's header in the file's
+  language; ``plan.call_site`` = ``{"replace_span": {"start", "end"},
+  "new_text": str}`` is the statement replacing the span (``render``), and
+  ``new_symbol.notes`` what they cannot say. Both texts are None when
+  ``kind`` is; ``call_site`` also when an awaiting span sits in a host that
+  is not async. A missing name reads ``<name>`` in them,
+  and ``suggested_name`` is in the language's private form (Python ``_x``).
 - ``evidence`` = ``{"slice_nloc": int, "ccn_removed": int}`` -- the size and
   complexity (code lines, decision points) the residual method sheds.
 - ``blast_radius`` = ``{"scope": "local"}`` -- extraction is local (a new
@@ -90,6 +100,7 @@ from ..dataflow import find_extractions, get_defuse_dialect
 from ..effort import effort_bucket
 from ..perf.dialects import PERF_DIALECTS
 from ..scoring import severity_deduction
+from . import render
 from .helper_naming import ScopeNames, helper_name, out_value_name
 from .models import RefactoringContext, RefactoringSuggestion
 from .registry import RefactoringDetector, register
@@ -97,7 +108,7 @@ from .registry import RefactoringDetector, register
 if TYPE_CHECKING:
     from ..complexity.languages import LanguageNodeMap
     from ..dataflow import Extraction, FunctionAnalysis
-    from ..dataflow.dialects.base import Receiver
+    from ..dataflow.dialects.base import BaseDefUseDialect, Receiver
     from ..models import Severity
 
 # The function-level structural biomarkers this detector answers. A function is
@@ -161,6 +172,23 @@ class ExtractMethodDetector(RefactoringDetector):
             if best is None:
                 continue
             impact, share, source = self._impact_for(analysis, best, matched)
+            name = render.private_name(
+                ctx.language,
+                names.claim(
+                    analysis,
+                    helper_name(analysis, best, lmap, ctx.language, names.imports(fn_node)),
+                ),
+            )
+            async_fields = _async_fields(analysis, best, lmap, ctx.language)
+            symbol = _render_fields(
+                analysis,
+                best,
+                dialect,
+                ctx.language,
+                name,
+                _symbol_fields(best, receiver),
+                async_host=async_fields.get("async_host", True),
+            )
             out.append(
                 RefactoringSuggestion(
                     refactoring_type=self.name,
@@ -172,14 +200,9 @@ class ExtractMethodDetector(RefactoringDetector):
                         "span": {"start": best.start_line, "end": best.end_line},
                         "params": list(best.params),
                         "returns": list(best.returns),
-                        "suggested_name": names.claim(
-                            analysis,
-                            helper_name(
-                                analysis, best, lmap, ctx.language, names.imports(analysis.fn_node)
-                            ),
-                        ),
-                        **_async_fields(analysis, best, lmap, ctx.language),
-                        **_symbol_fields(best, receiver),
+                        "suggested_name": name,
+                        **async_fields,
+                        **symbol,
                     },
                     evidence={
                         "slice_nloc": best.slice_nloc,
@@ -307,6 +330,120 @@ def _symbol_fields(extraction: Extraction, receiver: Receiver | None) -> dict[st
     if hazard:
         fields["receiver_hazard"] = hazard
     return fields
+
+
+def _render_fields(
+    analysis: FunctionAnalysis,
+    extraction: Extraction,
+    dialect: BaseDefUseDialect | None,
+    language: str | None,
+    name: str | None,
+    symbol: dict[str, Any],
+    *,
+    async_host: bool,
+) -> dict[str, Any]:
+    """*symbol* with ``new_symbol`` given its typed ``params`` / ``returns``,
+    ``signature_text`` and any ``notes``, plus ``call_site`` (``render``).
+    Types are read off the retained tree at each name's declaration, only for
+    this plan's few names; the texts are None when the helper's form is
+    unknown, and ``call_site`` also when the host cannot await the helper."""
+    new_symbol = symbol["new_symbol"]
+    types = _declared_types(analysis, extraction, dialect)
+    # Only a Rust value moves when passed, so only Rust asks what is read later.
+    after = _read_after(analysis, extraction) if language == "rust" else set()
+    # A method reaches its instance through the receiver, not an argument.
+    own = new_symbol["receiver"] if new_symbol["kind"] == "method" else None
+    params = tuple(
+        render.Slot(p, types.get(p), p in after) for p in extraction.params if p != own
+    )
+    returns = tuple(render.Slot(r, types.get(r)) for r in extraction.returns)
+    declared, before, rebound = _out_binding(analysis, extraction)
+    fn_node = analysis.fn_node
+    texts = render.render(
+        render.HelperShape(
+            language=language or "",
+            name=name,
+            kind=new_symbol["kind"],
+            is_async=extraction.needs_async,
+            params=params,
+            returns=returns,
+            receiver=new_symbol["receiver"],
+            receiver_decl=dialect.receiver_decl(fn_node) if dialect and fn_node else None,
+            async_host=async_host,
+            out_declared=declared,
+            out_written_before=before,
+            out_rebound=rebound,
+        )
+    )
+    rendered = {
+        **new_symbol,
+        "params": render.symbol_params(params, returns),
+        "returns": [{"name": r.name, "type": r.type} for r in returns],
+        "signature_text": texts.signature if texts else None,
+    }
+    if texts and texts.notes:
+        rendered["notes"] = list(texts.notes)
+    span = {"start": extraction.start_line, "end": extraction.end_line}
+    call = texts.call if texts else None
+    return {
+        **symbol,
+        "new_symbol": rendered,
+        "call_site": {"replace_span": span, "new_text": call} if call else None,
+    }
+
+
+def _declared_types(
+    analysis: FunctionAnalysis, extraction: Extraction, dialect: BaseDefUseDialect | None
+) -> dict[str, str]:
+    """Each IN / OUT name's declared type, from its latest typed write at or
+    before the span's end (a parameter, a typed declaration). Definitions are
+    numbered by CFG block, not source order, so they are sorted first."""
+    fn_node = analysis.fn_node
+    wanted = set(extraction.params) | set(extraction.returns)
+    if dialect is None or fn_node is None or not wanted:
+        return {}
+    writes = sorted(
+        (d for d in analysis.def_use.definitions if d.var in wanted and d.line <= extraction.end_line),
+        key=lambda d: (d.line, d.column),
+        reverse=True,
+    )
+    found: dict[str, str] = {}
+    for d in writes:
+        if d.var in found:
+            continue
+        raw = d.var.encode()
+        row = d.line - 1
+        # Tree points are byte columns.
+        node = fn_node.descendant_for_point_range((row, d.column), (row, d.column + len(raw)))
+        if node is not None and node.text == raw:
+            typ = dialect.declared_type(node)
+            if typ:
+                found[d.var] = typ
+    return found
+
+
+def _read_after(analysis: FunctionAnalysis, extraction: Extraction) -> set[str]:
+    """The IN names the function reads after the span (a closure's read counts
+    where the closure is written)."""
+    wanted, e = set(extraction.params), extraction.end_line
+    def_use = analysis.def_use
+    uses = [u for bdu in def_use.blocks.values() for u in bdu.uses if not u.echo]
+    return {u.name for u in (*uses, *def_use.captured.reads) if u.name in wanted and u.line > e}
+
+
+def _out_binding(
+    analysis: FunctionAnalysis, extraction: Extraction
+) -> tuple[bool, bool, bool]:
+    """Whether the span's output is declared in it (the call must declare it:
+    an in-span declaration, or no write before the span), whether it was
+    written before the span, and whether it is written again after it."""
+    if not extraction.returns:
+        return False, False, False
+    out, s, e = extraction.returns[0], extraction.start_line, extraction.end_line
+    writes = [d for d in analysis.def_use.definitions if d.var == out]
+    before = any(d.line < s for d in writes)
+    declared = any(s <= d.line <= e and d.declares for d in writes) or not before
+    return declared, before, any(d.line > e for d in writes)
 
 
 def _receiver_hazard(

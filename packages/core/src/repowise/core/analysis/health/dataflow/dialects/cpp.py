@@ -38,7 +38,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import NO_RECEIVER, BaseDefUseDialect, Occurrence, Receiver, StatementDefUse
+from .base import (
+    NO_RECEIVER,
+    BaseDefUseDialect,
+    Occurrence,
+    Receiver,
+    StatementDefUse,
+    node_text,
+)
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -84,6 +91,10 @@ class CppDefUseDialect(BaseDefUseDialect):
     member_access_kinds = frozenset({_FIELD_EXPRESSION})
     receiver_write_kinds = _ASSIGN_KINDS | _UPDATE_KINDS
     keyword_kinds = frozenset()  # C++ has no keyword arguments.
+    type_holder_kinds = frozenset(
+        {"parameter_declaration", "optional_parameter_declaration", "declaration"}
+    )
+    type_wrapper_kinds = frozenset({"init_declarator", "pointer_declarator", "reference_declarator"})
 
     def _is_scope_boundary(self, node: Node) -> bool:
         return node.type in _SCOPE_BOUNDARIES
@@ -129,6 +140,32 @@ class CppDefUseDialect(BaseDefUseDialect):
             if name_node is not None:
                 out.append(self._occ(name_node))
         return tuple(out)
+
+    def receiver_decl(self, fn_node: Node) -> str | None:
+        """``const`` when the member function is (``int f() const``): a helper
+        method it calls must be ``const`` too."""
+        node = fn_node.child_by_field_name("declarator")
+        while node is not None and node.type != "function_declarator":
+            node = node.child_by_field_name("declarator")
+        if node is None:
+            return None
+        quals = {node_text(c) for c in node.children if c.type == "type_qualifier"}
+        return "const" if "const" in quals else None
+
+    def _declarator_token(self, node: Node) -> str:
+        """``*`` for a pointer declarator, ``&`` / ``&&`` for a reference."""
+        if node.type == "init_declarator" or not node.children:
+            return ""
+        return node_text(node.children[0])
+
+    def _type_prefix(self, holder: Node, typ: Node) -> str:
+        """``const`` / ``volatile`` written before the type."""
+        quals = [
+            node_text(c)
+            for c in holder.named_children
+            if c.type == "type_qualifier" and c.end_byte <= typ.start_byte
+        ]
+        return "".join(q + " " for q in quals)
 
     def _own_receiver(self, fn_node: Node, lmap: LanguageNodeMap) -> Receiver | None:
         """``this`` for a member function defined in its class (a bare name

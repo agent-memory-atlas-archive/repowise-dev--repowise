@@ -19,7 +19,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import NO_RECEIVER, BaseDefUseDialect, Occurrence, Receiver, StatementDefUse
+from .base import (
+    NO_RECEIVER,
+    BaseDefUseDialect,
+    Occurrence,
+    Receiver,
+    StatementDefUse,
+    node_text,
+)
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -46,6 +53,7 @@ class GoDefUseDialect(BaseDefUseDialect):
     language = "go"
     member_access_kinds = frozenset({"selector_expression"})
     receiver_write_kinds = _ASSIGN_KINDS | _INC_DEC_KINDS
+    type_holder_kinds = frozenset({"parameter_declaration", "var_spec"})
     keyword_kinds = frozenset()  # Go has no keyword arguments.
 
     def _is_scope_boundary(self, node: Node) -> bool:
@@ -79,6 +87,11 @@ class GoDefUseDialect(BaseDefUseDialect):
                     if child.type in self.identifier_kinds and child.text != b"_":
                         out.append(self._occ(child))
         return tuple(out)
+
+    def receiver_decl(self, fn_node: Node) -> str | None:
+        """The method's receiver list, ``(s *S)``, which a helper method repeats."""
+        plist = fn_node.child_by_field_name("receiver")
+        return node_text(plist) if plist is not None else None
 
     def _own_receiver(self, fn_node: Node, lmap: LanguageNodeMap) -> Receiver | None:
         """The method receiver's own name; a value receiver (``s T``, not

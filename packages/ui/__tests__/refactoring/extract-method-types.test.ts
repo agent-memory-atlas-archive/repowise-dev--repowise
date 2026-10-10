@@ -4,6 +4,7 @@ import {
   generatedVerdict,
   planSynopsis,
   planWins,
+  slotLabel,
   type GeneratedCode,
   type RefactoringPlan,
 } from "../../src/refactoring/types";
@@ -89,6 +90,33 @@ describe("extract_method plan accessors", () => {
       ["n"],
       "receiver_copy_written",
     ]);
+  });
+
+  it("reads the rendered signature, call site and typed params, null before them", () => {
+    const old = extractMethodPlan(extractMethodPlanFixture());
+    expect([old.signature_text, old.call_site, old.typed_params]).toEqual([null, null, []]);
+    const em = extractMethodPlan(
+      extractMethodPlanFixture({
+        plan: {
+          span: { start: 30, end: 48 },
+          params: ["records"],
+          returns: ["average"],
+          new_symbol: {
+            kind: "function",
+            params: [{ name: "records", type: "list[int]", mode: "in" }],
+            returns: [{ name: "average", type: null }],
+            signature_text: "def _compute_average(records: list[int]):",
+          },
+          call_site: { replace_span: { start: 30, end: 48 }, new_text: "average = _compute_average(records)" },
+        },
+      }),
+    );
+    expect(em.signature_text).toBe("def _compute_average(records: list[int]):");
+    expect(em.call_site?.new_text).toBe("average = _compute_average(records)");
+    expect(em.typed_params[0]).toEqual({ name: "records", type: "list[int]", mode: "in" });
+    expect(em.typed_params.map(slotLabel)).toEqual(["records: list[int]"]);
+    expect(em.typed_returns.map(slotLabel)).toEqual(["average"]);
+    expect(em.notes).toEqual([]);
   });
 
   it("returns a null span when the plan omits it", () => {
