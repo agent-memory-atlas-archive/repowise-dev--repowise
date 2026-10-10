@@ -23,10 +23,8 @@ from repowise.server.mcp_server._budget import OmissionCollector
 _REASONS_LIMIT = 3
 #: Changed files whose deciding evidence is named.
 _BASIS_LIMIT = 10
-#: Past this the agent is told to run the CLI instead of waiting. Ceiling: a
-#: change whose triggers scope a whole workspace walks every route to it (two
-#: minutes on a 2k-test repository); loading the graph once per call is the
-#: upgrade that lifts it.
+#: Past this the agent is told to run the CLI instead of waiting. Ceiling: the
+#: call walk is per-level SQL; loading call edges once is the upgrade.
 SELECTION_TIMEOUT_SECONDS = 30.0
 
 #: What a failed selection tells the reader: it vouches for no subset.

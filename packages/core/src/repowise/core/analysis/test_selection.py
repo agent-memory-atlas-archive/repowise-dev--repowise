@@ -382,6 +382,12 @@ def plugin_loader(sources: Iterable[tuple[str, str]]) -> str | None:
 PACKAGE_INIT_REASON = "every import of the package runs it, and those are not all tracked"
 
 
+# Path predicates the selection asks hundreds of thousands of times on a large
+# change (once per test per changed file); each is pure in the path.
+_PATH_MEMO = 1 << 16
+
+
+@functools.lru_cache(maxsize=_PATH_MEMO)
 def scope_kind(path: str) -> str | None:
     """``test-package`` or ``conftest`` for a file every test under its directory runs.
 
@@ -418,12 +424,13 @@ def is_runnable_test(path: str, roots: PytestRoots | None = None) -> bool:
     With *roots*, a Python file pytest's config leaves out of collection
     (``core/test_paths.py``) is not one: the same rule that stamps ``is_test``.
     """
+    return _runnable_name(path) and (roots is None or is_test_path(path, roots=roots))
+
+
+@functools.lru_cache(maxsize=_PATH_MEMO)
+def _runnable_name(path: str) -> bool:
     p = PurePosixPath(path)
-    return (
-        p.suffix.lower() in _TEST_CODE_SUFFIXES
-        and is_test_path(p.name)
-        and (roots is None or is_test_path(path, roots=roots))
-    )
+    return p.suffix.lower() in _TEST_CODE_SUFFIXES and is_test_path(p.name)
 
 
 @functools.lru_cache(maxsize=8)
@@ -704,7 +711,7 @@ def _scope_tests(scope: Scope, ev: _Evidence) -> list[str]:
         return []
     return [
         t
-        for t in _under({scope.root}, ev.known_tests)
+        for t in _known_under(ev, {scope.root})
         if (not scope.suffixes or t.lower().endswith(scope.suffixes)) and t not in ev.deleted
     ]
 
@@ -952,6 +959,8 @@ class _Evidence:
     every_subset: frozenset[str] = frozenset()
     # Explanations that do not force a full run, gathered while deciding.
     notes: list[str] = field(default_factory=list)
+    # Known tests under each directory set (:func:`_known_under`), per selection.
+    under_memo: dict[frozenset[str], list[str]] = field(default_factory=dict, compare=False)
 
     @classmethod
     def of(cls, inp: SelectionInput, deleted: set[str]) -> _Evidence:
@@ -1056,7 +1065,16 @@ def _scope_files(path: str, found: list[_TestRef], basis: str) -> tuple[set[str]
 
 def _expand_scopes(tests: list[_TestRef], scopes: set[str], ev: _Evidence) -> list[_TestRef]:
     kept = [(t, f) for t, f in tests if f not in scopes]
-    return kept + [(t, t) for t in _tests_under(scopes, ev.known_tests) if t not in ev.deleted]
+    dirs = {str(PurePosixPath(i).parent) for i in scopes}
+    return kept + [(t, t) for t in _known_under(ev, dirs) if t not in ev.deleted]
+
+
+def _known_under(ev: _Evidence, dirs: Collection[str]) -> list[str]:
+    """Known tests below any of *dirs*, worked out once per directory set per selection."""
+    key = frozenset(dirs)
+    if key not in ev.under_memo:
+        ev.under_memo[key] = _under(key, ev.known_tests)
+    return ev.under_memo[key]
 
 
 def _own_helper_reasons(path: str, ev: _Evidence) -> list[str]:
