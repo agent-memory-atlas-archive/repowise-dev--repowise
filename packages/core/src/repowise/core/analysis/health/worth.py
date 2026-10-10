@@ -291,6 +291,13 @@ def perf_facets(row: Any) -> Mapping[str, Any]:
     return field(row, "facets") or detail_map(row).get("facets") or {}
 
 
+def execution_role(row: Any) -> str:
+    """The role running a cause's loop: the stored column, else its facet;
+    ``unknown`` on an index stored before roles were. Which role a function
+    gets is decided in :mod:`repowise.core.analysis.execution_roles`."""
+    return field(row, "execution_role") or perf_facets(row).get("execution_role") or "unknown"
+
+
 def lead_reason(marker: str | None, facets: Mapping[str, Any]) -> LowPriority | None:
     """Why a performance cause may not lead, or ``None`` when it may.
 
@@ -335,6 +342,7 @@ __all__ = [
     "cost_proof",
     "dispatch_shaped",
     "dormant",
+    "execution_role",
     "finding_priorities",
     "lead_reason",
     "low_priority",

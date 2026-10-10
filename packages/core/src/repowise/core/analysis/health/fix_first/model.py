@@ -191,6 +191,9 @@ class FixItem:
     source: FixSource
     next_call: ActionCommand
     why_ranked: tuple[FixRankFact, ...] = ()
+    #: The value band (``queue.value``) Do next ranks the item on; ``None`` on a
+    #: snapshot stored before items carried it.
+    value: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
