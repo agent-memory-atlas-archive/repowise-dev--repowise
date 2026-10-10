@@ -10,12 +10,17 @@ import type {
   PerformanceOpportunityValidation,
   PerformanceModelState,
 } from "@repowise-dev/types/health";
-import type { RecommendationValidation, RefactoringPlan } from "@repowise-dev/types/refactoring";
+import type {
+  RecommendationValidation,
+  RefactoringPlan,
+  StepVerify,
+} from "@repowise-dev/types/refactoring";
 
 import { AdaptivePanel } from "../../shared/adaptive-panel";
 import { CollapsibleSection } from "../../shared/collapsible-section";
 import { InfoTip } from "../../shared/info-tip";
 import { formatNumber } from "../../lib/format";
+import { CommandLine } from "../../shared/command-line";
 import { ProvenancePathList } from "../../shared/provenance-path-list";
 import { performancePlanDetail } from "../../refactoring/types";
 import { SourceExcerpt } from "../../refactoring/source-excerpt";
@@ -242,7 +247,11 @@ function PlanSteps({ steps }: { steps: PerformanceOpportunityPlanStep[] }) {
     <ol className="mt-3 space-y-1.5">
       {groups.map((group, index) => {
         const first = group[0]!;
-        const places = group.map(where).filter((p): p is string => Boolean(p));
+        const places = group
+          .map((step) => ({ place: where(step), verify: step.verify }))
+          .filter((p): p is { place: string; verify: StepVerify | undefined } =>
+            Boolean(p.place),
+          );
         return (
           <li key={first.order} className="text-sm text-[var(--color-text-secondary)]">
             <span className="tabular-nums text-[var(--color-text-tertiary)]">{index + 1}.</span>{" "}
@@ -256,14 +265,18 @@ function PlanSteps({ steps }: { steps: PerformanceOpportunityPlanStep[] }) {
               <span className="ml-1.5 text-xs text-[var(--color-text-tertiary)]">mechanical</span>
             ) : null}
             {places.length === 1 ? (
-              <span className="ml-1.5 break-all font-mono text-xs text-[var(--color-text-tertiary)]">
-                {places[0]}
-              </span>
+              <>
+                <span className="ml-1.5 break-all font-mono text-xs text-[var(--color-text-tertiary)]">
+                  {places[0]!.place}
+                </span>
+                <StepCheck verify={places[0]!.verify} />
+              </>
             ) : places.length > 1 ? (
               <ul className="mt-1 space-y-0.5 pl-5">
                 {places.map((p) => (
-                  <li key={p} className="break-all font-mono text-xs text-[var(--color-text-tertiary)]">
-                    {p}
+                  <li key={p.place} className="break-all font-mono text-xs text-[var(--color-text-tertiary)]">
+                    {p.place}
+                    <StepCheck verify={p.verify} />
                   </li>
                 ))}
               </ul>
@@ -272,6 +285,28 @@ function PlanSteps({ steps }: { steps: PerformanceOpportunityPlanStep[] }) {
         );
       })}
     </ol>
+  );
+}
+
+/**
+ * How to check one step, when it differs from the plan: the server omits
+ * `verify` on a step the plan's validation already checks.
+ */
+function StepCheck({ verify }: { verify: StepVerify | undefined }) {
+  if (!verify) return null;
+  if (verify.coverage === "none") {
+    return (
+      <p className="mt-1 font-sans text-xs text-[var(--color-text-tertiary)]">
+        No test reaches this step.
+      </p>
+    );
+  }
+  return (
+    <>
+      {verify.commands.map((command) => (
+        <CommandLine key={command} command={command} />
+      ))}
+    </>
   );
 }
 

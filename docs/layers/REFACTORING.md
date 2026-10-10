@@ -60,6 +60,11 @@ tests named for the file, then the call graph. Tests that reach the file only
 through a widely imported hub module are left out. When no test reaches the
 change, the plan has no command and asks for a characterization test first.
 
+In a plan with several steps, such as a performance fix at several call sites,
+plan detail adds a `verify` to each step whose tests differ from the plan's: the
+tests that reach that step's lines and the command to run them. A step without
+one is checked by the plan's own command.
+
 ## Reading the results
 
 A **plan** is one detector's output for one target. An **opportunity** is one

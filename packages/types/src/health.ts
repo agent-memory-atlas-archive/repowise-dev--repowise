@@ -18,7 +18,12 @@
 import type { C4IoKind } from "./external-systems.js";
 import type { CoverageHistoryPoint, CoverageSummary } from "./generated/http.js";
 import type { Paginated } from "./pagination.js";
-import type { StepClassification, ValidationBasis, ValidationVia } from "./refactoring.js";
+import type {
+  StepClassification,
+  StepVerify,
+  ValidationBasis,
+  ValidationVia,
+} from "./refactoring.js";
 
 /** Finding severity used across the health surface. */
 export type HealthSeverity = "low" | "medium" | "high" | "critical";
@@ -435,6 +440,9 @@ export interface PerformanceOpportunityPlanStep {
   file_path: string | null;
   line: number | null;
   applicability: StepClassification;
+  /** How to check this step, when it differs from the plan's validation.
+   *  Absent: the plan's validation checks it. */
+  verify?: StepVerify;
 }
 
 /** Ranking inputs behind a plan, not a cost/benefit ledger. */

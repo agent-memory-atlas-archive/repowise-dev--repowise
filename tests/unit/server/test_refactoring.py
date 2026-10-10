@@ -400,6 +400,46 @@ async def test_plan_detail_by_id(client: AsyncClient, app) -> None:
     assert detail["plan"]["cut_edges"] == [{"from": "pkg/a.py", "to": "pkg/b.py"}]
 
 
+async def test_an_unranked_plan_detail_serves_steps_without_verify(
+    client: AsyncClient, app
+) -> None:
+    repo_id = await _seed(client, app)
+    steps = [
+        {"order": 1, "action": "Batch", "symbol": "load", "file_path": "pkg/hub.py", "line": 3},
+        {"order": 2, "action": "Batch", "symbol": "run", "file_path": "pkg/a.py", "line": 7},
+    ]
+    async with app.state.session_factory() as session:
+        await crud.save_refactoring_suggestions(
+            session,
+            repo_id,
+            [
+                {
+                    "refactoring_type": "performance_fix",
+                    "file_path": "pkg/hub.py",
+                    "target_symbol": "pkg/hub.py::load",
+                    "plan": {"opportunity_id": "opp-steps", "steps": steps},
+                    "evidence": {},
+                    "impact_delta": 0.0,
+                    "effort_bucket": "M",
+                    "blast_radius": {},
+                    "confidence": "medium",
+                    "source_biomarker": "io_in_loop",
+                }
+            ],
+        )
+        await session.commit()
+    listed = (
+        await client.get(
+            f"/api/repos/{repo_id}/refactoring/targets",
+            params={"refactoring_type": "performance_fix"},
+        )
+    ).json()["plans"]
+    assert listed[0]["plan"]["steps"] == steps
+    # Unranked here, so the read serves the plan-level answer and rebuilds no step.
+    detail = (await client.get(f"/api/repos/{repo_id}/refactoring/{listed[0]['id']}")).json()
+    assert detail["plan"]["steps"] == steps
+
+
 async def test_plan_detail_unknown_id_404(client: AsyncClient, app) -> None:
     repo_id = await _seed(client, app)
     resp = await client.get(f"/api/repos/{repo_id}/refactoring/deadbeef")
