@@ -481,8 +481,10 @@ async def _finding_validator(
             evidence=inputs.evidence,
             order_tests=False,
         )
-        # No test found: unknown, not the bare repo-wide command a plan falls back to.
-        return plan.as_dict() if plan.total else None
+        if plan.total:
+            return plan.as_dict()
+        # No test found: unknown, with only the step to take before the edit.
+        return {"prerequisite": plan.prerequisite} if plan.prerequisite else None
 
     return validate
 
