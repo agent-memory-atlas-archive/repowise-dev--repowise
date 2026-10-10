@@ -60,7 +60,7 @@ from __future__ import annotations
 import functools
 import re
 import shlex
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -333,20 +333,27 @@ def doc_readers(docs: Collection[str], sources: Iterable[tuple[str, str]]) -> di
     return {doc: names[0] for doc, names in file_namers(docs, sources).items()}
 
 
-def file_namers(files: Collection[str], sources: Iterable[tuple[str, str]]) -> dict[str, list[str]]:
+def file_namers(
+    files: Collection[str],
+    sources: Iterable[tuple[str, str]],
+    exact: Callable[[str], bool] | None = None,
+) -> dict[str, list[str]]:
     """``{file: the code naming it}`` for each of *files* some code or config names.
 
     Code that reads a file names it (``ROOT / "README.md"``), and a
     ``--doctest-glob`` turns every doc into a test, so the config declaring
     one names each doc (first). One substring test per distinct file name and
-    source, and every namer is listed: a caller decides what too many means.
-    Ceiling: code that globs a directory names no file.
+    source. A file *exact* accepts is named only by a mention whose written
+    path can mean it (:mod:`~.namer_paths`); any other is
+    named by its name alone, since another asset may include it (a stylesheet
+    ``@import``) where no code names its directory. Every namer is listed: a
+    caller decides what too many means. Ceiling: code that globs a directory
+    names no file.
     """
     by_name: dict[str, list[str]] = {}
     for f in files:
         by_name.setdefault(PurePosixPath(f).name, []).append(f)
     docs = [f for f in files if PurePosixPath(f).suffix.lower() in _DOC_SUFFIXES]
-    found: dict[str, list[str]] = {}
     out: dict[str, list[str]] = {}
     for path, text in sources:
         # Config only for the glob, code only for names: pyproject's
@@ -356,13 +363,35 @@ def file_namers(files: Collection[str], sources: Iterable[tuple[str, str]]) -> d
                 for doc in docs:
                     out.setdefault(doc, []).insert(0, path)
             continue
-        for name in by_name:
-            if name in text:
-                found.setdefault(name, []).append(path)
-    for name, namers in found.items():
-        for f in by_name[name]:
-            out.setdefault(f, []).extend(n for n in namers if n != f)
+        for f in _named_in(text, path, by_name, exact):
+            out.setdefault(f, []).append(path)
     return {f: n for f, n in out.items() if n}
+
+
+def _named_in(
+    text: str,
+    path: str,
+    by_name: Mapping[str, list[str]],
+    exact: Callable[[str], bool] | None,
+) -> list[str]:
+    """The files of *by_name* that *path*'s *text* names (see :func:`file_namers`).
+
+    The text is scanned once per name held, whatever the number of files of
+    that name.
+    """
+    from .namer_paths import any_may_mean, mentions
+
+    out: list[str] = []
+    for name, same in by_name.items():
+        if name not in text:
+            continue
+        written = mentions(text, name) if exact and any(exact(f) for f in same) else None
+        out += [
+            f
+            for f in same
+            if f != path and (written is None or not exact(f) or any_may_mean(written, f))
+        ]
+    return out
 
 
 def plugin_loader(sources: Iterable[tuple[str, str]]) -> str | None:
