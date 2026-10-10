@@ -41,6 +41,7 @@ from ...ingestion.package_roots import scan_package_roots as _scan_package_roots
 from ...installed_components import is_installed_component
 from ...test_paths import paired_test_names
 from ..dead_code.file_reachability import file_dependency_neighbors
+from ..execution_roles import ExecutionRoles
 from ..graph_view import HasEdge, ImportEdgeView
 from ..test_reachability import files_reached_by_tests, files_with_paired_tests
 from .asserts.lexicon import AssertVocabulary
@@ -1037,7 +1038,7 @@ class HealthAnalyzer:
 
         timings_finalize = timed(timings, "analysis.health.finalize")
         timings_finalize.__enter__()
-        self._mark_perf_entry_reachability(findings)
+        execution_roles = self._mark_perf_entry_reachability(findings)
         link_performance_findings(findings)
         opportunities = build_performance_opportunities(findings)
         if refactoring_enabled and "performance_fix" not in disabled_refactorings:
@@ -1058,6 +1059,7 @@ class HealthAnalyzer:
             metrics=metrics,
             kpis=kpis,
             function_blame_rows=self._function_blame_rows(walked),
+            execution_roles=execution_roles,
             repo_function_mod_p80=full_repo_fn_mod_p80,
             refactoring_suggestions=suggestions,
             performance_plan_policy=PerformancePlanPolicy(
@@ -1242,7 +1244,7 @@ class HealthAnalyzer:
         else:
             kpis = {}
 
-        self._mark_perf_entry_reachability(findings)
+        execution_roles = self._mark_perf_entry_reachability(findings)
         link_performance_findings(findings)
         opportunities = build_performance_opportunities(findings)
         if refactoring_enabled and "performance_fix" not in disabled_refactorings:
@@ -1262,6 +1264,7 @@ class HealthAnalyzer:
             metrics=metrics,
             kpis=kpis,
             function_blame_rows=self._function_blame_rows(walked),
+            execution_roles=execution_roles,
             repo_function_mod_p80=full_repo_fn_mod_p80,
             refactoring_suggestions=suggestions,
             performance_plan_policy=PerformancePlanPolicy(
@@ -1372,28 +1375,41 @@ class HealthAnalyzer:
             log.debug("health_crossfn_perf_failed", error=str(exc))
             return
 
-    def _mark_perf_entry_reachability(self, findings: list[HealthFindingData]) -> None:
-        """Stamp reliable entry reachability without walking once per row."""
+    def _mark_perf_entry_reachability(
+        self, findings: list[HealthFindingData]
+    ) -> ExecutionRoles | None:
+        """Stamp entry reachability and execution role without walking once per row.
+
+        The role is keyed on the loop-owning function: the path's first node
+        when the cost crosses functions, else the symbol holding the finding.
+        The owner is stored too, so the writer can restamp a stored finding
+        this run did not rescan. Returns the roles for that writer.
+        """
         index = self._execution_graph()
+        perf = [finding for finding in findings if finding.dimension == "performance"]
         if index is None or self.graph is None:
-            return
-        entry_files: set[str] = set()
-        try:
-            for node_id, data in self.graph.nodes(data=True):
-                if data.get("node_type") == "file" and data.get("is_entry_point"):
-                    entry_files.add(node_id)
-        except Exception:
-            return
+            return None
+        entry_files = {
+            node_id
+            for node_id, data in self.graph.nodes(data=True)
+            if data.get("node_type") == "file" and data.get("is_entry_point")
+        }
         seeds = {symbol for path in entry_files for symbol in index.declares.get(path, ())}
-        if not seeds:
-            return
-        reachable = index.forward_reachable(seeds)
-        for finding in findings:
-            if finding.dimension != "performance":
-                continue
+        reachable = index.forward_reachable(seeds) if seeds and perf else None
+        try:
+            roles = ExecutionRoles.build(self.graph, index)
+        except Exception as exc:
+            log.debug("health_execution_roles_failed", error=str(exc))
+            roles = None
+        for finding in perf:
             path = finding.details.get("path")
-            if isinstance(path, list) and path:
+            if reachable is not None and isinstance(path, list) and path:
                 finding.details["reliable_entry_reachability"] = path[0] in reachable
+            if roles is not None:
+                owner = roles.owner_of(finding.file_path, finding.line_start, finding.details)
+                finding.details["role_owner"] = owner
+                finding.details["execution_role"] = roles.role_of(owner, finding.file_path)
+        return roles
 
     def _function_blame_rows(self, walked: list[tuple[Any, FileComplexity]]) -> list[dict]:
         """Build the per-function blame rollup from the walked files + the

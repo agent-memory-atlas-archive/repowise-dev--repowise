@@ -16,17 +16,20 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from repowise.core.analysis.execution_roles import EXECUTION_ROLES
 from repowise.core.analysis.health import queue_rules
 from repowise.core.analysis.health.finding_identity import finding_public_id
 from repowise.core.analysis.health.fix_first.text import perf_cost
 from repowise.core.analysis.health.queue.eligibility import (
     DEFAULT_QUEUE_PROOFS,
     DEFAULT_QUEUE_STATES,
+    QUEUE_PROOFS,
+    QUEUE_ROLES,
     perf_low_priority,
 )
 from repowise.core.analysis.health.queue_rules import NULL_VALUE, Facet, FilterRule, SortKeys
 from repowise.core.analysis.health.rows import detail_map, field, json_field
-from repowise.core.analysis.health.worth import COST_PROOFS, LOW_PRIORITY_LABEL
+from repowise.core.analysis.health.worth import LOW_PRIORITY_LABEL
 
 from .opportunities import PERFORMANCE_MODEL_VERSION
 from .opportunity_rank import NON_LEADING_MARKERS
@@ -63,6 +66,8 @@ CANONICAL_VIEWS = ("detail", "summary")
 CONFIDENCES = ("high", "medium", "low")
 ACTIONABILITIES = ("plan_ready", "advisory", "investigate", "expected")
 BOUNDARIES = ("db", "network", "filesystem", "subprocess", "lock", NULL_VALUE)
+ROLES = (*EXECUTION_ROLES, "all")
+"""One execution role, or ``all``. Absent means the roles the default queue holds."""
 
 DEFAULT_ACTIONABILITIES = DEFAULT_QUEUE_STATES
 """``expected`` rows offer nothing to change and ``investigate`` rows no strategy to apply,
@@ -115,6 +120,7 @@ FILTERS: tuple[FilterRule, ...] = (
     FilterRule("confidence", "evidence_confidence", "eq", "set"),
     FilterRule("actionabilities", "actionability_state", "in", "set"),
     FilterRule("proofs", "cost_proof", "in", "set"),
+    FilterRule("roles", "execution_role", "in", "set"),
     FilterRule("file_paths", "file_path", "in", "set"),
 )
 
@@ -127,6 +133,7 @@ FACETS: tuple[Facet, ...] = (
     ("actionability", "actionability_state", "actionabilities"),
     ("plan_state", "plan_state", None),
     ("proof", "cost_proof", "proofs"),
+    ("role", "execution_role", "roles"),
 )
 FACET_FIELDS = tuple(column for _, column, _ in FACETS)
 
@@ -157,6 +164,7 @@ def _facet_selection(query: PerformanceQuery) -> dict[str, Any]:
             None if query.actionability is None else frozenset({query.actionability})
         ),
         "proofs": None if query.proof is None else frozenset({query.proof}),
+        "roles": None if query.role in (None, "all") else frozenset({query.role}),
     }
 
 
@@ -205,6 +213,7 @@ class PerformanceQuery:
     confidence: str | None = None
     actionability: str | None = None
     proof: str | None = None
+    role: str | None = None
     view: str = "detail"
     sort: str = DEFAULT_SORT
     file_paths: tuple[str, ...] | None = None
@@ -238,6 +247,15 @@ class PerformanceQuery:
             return DEFAULT_QUEUE_PROOFS
         return frozenset({self.proof})
 
+    @property
+    def roles(self) -> frozenset[str] | None:
+        """One role when asked for, every role under ``all``; else the roles
+        the default queue holds, so startup, CLI, tooling and test loops sit
+        one filter away and the ``role`` facet counts them."""
+        if self.role is None:
+            return QUEUE_ROLES
+        return None if self.role == "all" else frozenset({self.role})
+
 
 def _resolve_context(context: str | None, ignored: dict[str, str]) -> PerformanceContext:
     if not context:
@@ -259,6 +277,7 @@ def parse_query(
     confidence: str | None = None,
     actionability: str | None = None,
     proof: str | None = None,
+    role: str | None = None,
     view: str | None = None,
     sort: str | None = None,
     file_paths: tuple[str, ...] | None = None,
@@ -288,7 +307,8 @@ def parse_query(
             boundary=pick("performance_boundary", boundary, BOUNDARIES),
             confidence=pick("performance_confidence", confidence, CONFIDENCES),
             actionability=pick("performance_actionability", actionability, ACTIONABILITIES),
-            proof=pick("performance_proof", proof, COST_PROOFS),
+            proof=pick("performance_proof", proof, QUEUE_PROOFS),
+            role=pick("performance_role", role, ROLES),
             view=pick("performance_view", view, CANONICAL_VIEWS) or "detail",
             sort=pick("performance_sort", sort, CANONICAL_SORTS) or DEFAULT_SORT,
             file_paths=file_paths,
@@ -492,7 +512,8 @@ def rescope_summary(
     proof: dict[str, int] = {}
     total = 0
     with_plan = 0
-    for execution_context, boundary_kind, _confidence, state, plan_state, cost, count in groups:
+    for group in groups:
+        execution_context, boundary_kind, _confidence, state, plan_state, cost, _role, count = group
         if execution_context not in contexts:
             continue
         total += count
@@ -562,6 +583,7 @@ __all__ = [
     "FACET_FIELDS",
     "FILTERS",
     "PLAN_REASONS",
+    "ROLES",
     "SORTS",
     "SUMMARY_UNAVAILABLE",
     "PerformanceContext",

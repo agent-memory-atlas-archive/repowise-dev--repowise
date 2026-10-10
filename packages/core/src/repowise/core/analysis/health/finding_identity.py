@@ -75,6 +75,8 @@ _DERIVED_DETAIL_KEYS = frozenset(
     {
         "opportunity_id",
         "reliable_entry_reachability",
+        "execution_role",
+        "role_owner",
         "dispatch_share",
         "deprecated",
         "gated_off",
