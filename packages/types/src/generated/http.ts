@@ -2782,6 +2782,7 @@ export interface RefactoringPlanDetailResponse {
   validation?: Record<string, unknown>;
   governed_by?: string[] | null;
   risks?: PlanRiskResponse[] | null;
+  recipe?: Record<string, unknown> | null;
 }
 
 /** Bounded product page; the legacy targets response remains unpaged. */
