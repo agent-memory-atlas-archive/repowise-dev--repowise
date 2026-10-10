@@ -242,3 +242,7 @@ class HealthReport:
     # restamp stored performance findings this run did not rescan. Typed ``Any``
     # for the same reason as ``refactoring_suggestions``.
     execution_roles: Any | None = None
+    # One dict per walked function symbol, for the ``function_facts`` store
+    # (``HealthAnalyzer._function_fact_rows``). None when there was no graph to
+    # key rows on: the writers then leave the stored rows alone.
+    function_facts: list[dict] | None = None

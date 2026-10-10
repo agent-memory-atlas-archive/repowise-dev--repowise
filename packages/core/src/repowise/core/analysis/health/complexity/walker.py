@@ -40,6 +40,9 @@ The whole-file passes share one descent of the tree (``file_scan``):
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
 import structlog
 
 from ..asserts.lexicon import assert_dialect as _assert_dialect
@@ -79,6 +82,12 @@ from .nloc import _count_file_nloc
 from .perf_walk import _collect_perf_hits, perf_pass_runs
 from .signature import is_constructor, is_signature_fixed, typed_param_counts
 from .test_case import is_test_case
+
+if TYPE_CHECKING:
+    from tree_sitter import Node
+
+    from ..dataflow.slice import FunctionFacts
+    from .body_facts import BodyTally
 
 __all__ = [
     "ClassComplexity",
@@ -166,10 +175,14 @@ def walk_file(
     run_perf = perf_pass_runs(language, lmap)
     scan = scan_file(tree.root_node, language, lmap, source, io_names=run_perf)
     flags = module_false_constants(tree.root_node, source, language)
+    facts_of = _facts_reader(abs_path, language, lmap)
     for fn_node in _collect_function_nodes(tree.root_node, lmap):
         body = fn_node.child_by_field_name("body") or fn_node
         deepest: list[int] = []
-        ccn, max_nest, cognitive, bumps, conditions = _walk_function_body(body, lmap, deepest)
+        start_facts, finish_facts = facts_of(fn_node)
+        ccn, max_nest, cognitive, bumps, conditions = _walk_function_body(
+            body, lmap, deepest, start_facts
+        )
         (
             assertion_blocks,
             assertion_count,
@@ -209,6 +222,7 @@ def walk_file(
             deprecated=is_deprecated(fn_node, body, name, lmap, source),
             gated_off=body is not fn_node and is_gated_off(body, flags),
             deepest_block=(deepest[0], deepest[1]) if deepest else None,
+            facts=finish_facts(),
         )
         functions.append(fc)
         fc_by_node_id[fn_node.id] = fc
@@ -230,6 +244,45 @@ def walk_file(
         has_inline_tests=_detect_inline_tests(source, language),
         rust_test_line_ranges=scan.rust_test_line_ranges,
     )
+
+
+FactsStart = Callable[["Node"], tuple["BodyTally | None", Callable[[], "FunctionFacts | None"]]]
+"""``fn_node -> (tally, finish)``; see :func:`_facts_reader`."""
+
+
+def _facts_reader(abs_path: str, language: str, lmap: Any) -> FactsStart:
+    """``fn_node -> (tally, finish)``: an empty tally the CCN walk fills, and
+    the call that reads :class:`FunctionFacts` off it once it is filled.
+
+    A failure leaves the function's facts ``None`` (not computed) and is
+    logged with the file, since a stored row then says nothing about it.
+    Deferred import: the dataflow package imports this one.
+    """
+    from ..dataflow import body_tally, function_facts, get_defuse_dialect
+
+    dialect = get_defuse_dialect(language)
+
+    def failed(exc: Exception) -> None:
+        log.warning("function_facts_failed", path=abs_path, error=str(exc))
+
+    def start(fn_node: Node) -> tuple[BodyTally | None, Callable[[], FunctionFacts | None]]:
+        try:
+            receiver = dialect.receiver(fn_node, lmap) if dialect is not None else None
+            tally = body_tally(fn_node, lmap, receiver)
+        except Exception as exc:
+            failed(exc)
+            return None, lambda: None
+
+        def finish() -> FunctionFacts | None:
+            try:
+                return function_facts(fn_node, lmap, receiver, tally)
+            except Exception as exc:
+                failed(exc)
+                return None
+
+        return tally, finish
+
+    return start
 
 
 def walk_file_complexity(

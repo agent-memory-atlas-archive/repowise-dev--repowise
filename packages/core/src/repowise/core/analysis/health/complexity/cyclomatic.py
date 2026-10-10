@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .body_facts import BodyTally, step
 from .languages import LanguageNodeMap
 from .models import ConditionComplexity
 
@@ -301,6 +302,7 @@ def _walk_function_body(
     body_node: Node,
     lmap: LanguageNodeMap,
     deepest: list[int] | None = None,
+    tally: BodyTally | None = None,
 ) -> tuple[int, int, int, int, list[ConditionComplexity]]:
     """Recursive AST walk. Returns (ccn, max_nesting, cognitive, bumps,
     complex_conditions).
@@ -323,6 +325,10 @@ def _walk_function_body(
     :data:`MIN_BLOCK_LINES` lines: where a reader starts flattening it. A
     one-line branch is too small to name as the place to start. Also a
     side-channel only.
+
+    ``tally``, when given, is filled on the same visits by :func:`body_facts.step`.
+    An expression body (``async () => await f()``) is a node the facts read
+    too, so the body root is counted when it is not the function itself.
     """
 
     ccn = 1
@@ -337,14 +343,17 @@ def _walk_function_body(
     deepest_depth = 0
     deepest_node: list[Node] = []
 
-    def _recurse(node: Node, depth: int, in_markup: bool = False) -> None:
+    def _recurse(node: Node, depth: int, in_markup: bool = False, scope: int = 0) -> None:
         nonlocal ccn, max_nesting, cognitive, deepest_depth
 
         # Don't descend into nested function bodies — they're walked
         # separately at the top level. Lambdas / arrow functions DO
         # contribute to the enclosing function's complexity.
-        if node.type in lmap.function_kinds:
+        node_type = node.type
+        if node_type in lmap.function_kinds:
             return
+        if tally is not None and node_type in tally.kinds.watched:
+            scope = step(tally, node, scope)
 
         nesting_increment = 0
         ccn_increment = 0
@@ -447,14 +456,22 @@ def _walk_function_body(
             and node.type not in _MARKUP_VALUE_KINDS
         )
         for child in node.children:
-            _recurse(child, new_depth, child_markup)
+            _recurse(child, new_depth, child_markup, scope)
 
+    root_scope = 0
+    if (
+        tally is not None
+        and body_node.type in tally.kinds.watched
+        and body_node.type not in lmap.function_kinds
+        and body_node.type not in lmap.lambda_kinds
+    ):
+        root_scope = step(tally, body_node, 0)
     for child in body_node.children:
         # Per-child peak depth: temporarily swap max_nesting out so we
         # can read just this child's contribution, then restore.
         outer_max = max_nesting
         max_nesting = 0
-        _recurse(child, 0)
+        _recurse(child, 0, scope=root_scope)
         child_peak = max_nesting
         max_nesting = max(outer_max, child_peak)
         if child_peak >= 2:

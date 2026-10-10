@@ -2067,6 +2067,50 @@ class PerformanceSummary(Base):
     )
 
 
+class FunctionFact(Base):
+    """One function symbol: what runs it and what its body does.
+
+    Written by the health writers: facts for the files a run walked, the
+    execution role for every row each run, since a role moves with seeds and
+    calls in other files. One row per function, so later per-function
+    measures are new columns here rather than a second table.
+
+    Lean on purpose: the file, name and lines are on ``graph_nodes`` under the
+    same ``symbol_id`` (``path::name``), so they are joined, not copied, and a
+    file's rows are a key range of ``symbol_id``. Booleans cost no body bytes
+    in SQLite (0 and 1 are header-only), and on SQLite the table is clustered
+    on its key, so the key is stored once.
+    """
+
+    __tablename__ = "function_facts"
+
+    repository_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("repositories.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Bytewise order on PostgreSQL, so a file's rows are one key range
+    # (``crud.analysis.function_facts.file_rows``); SQLite compares bytes already.
+    symbol_id: Mapped[str] = mapped_column(
+        Text().with_variant(Text(collation="C"), "postgresql"), primary_key=True
+    )
+    # ``execution_roles.ExecutionRole``.
+    execution_role: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown", server_default="unknown"
+    )
+    # ``dataflow.slice.FunctionFacts``; NULL where the walk produced none.
+    awaits: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_generator: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    uses_receiver: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Whether ``receiver_assigns_json`` is the whole set of fields assigned:
+    # NULL in that column then means none, otherwise unknown.
+    receiver_assigns_known: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    receiver_assigns_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    early_exits: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = ({"sqlite_with_rowid": False},)
+
+
 class RefactoringOpportunity(QueueVerdict, Base):
     """One file's composed refactoring work, materialized for serving.
 
